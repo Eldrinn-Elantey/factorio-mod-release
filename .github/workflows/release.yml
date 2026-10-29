@@ -1,0 +1,120 @@
+name: Release
+
+on:
+  workflow_call:
+    inputs:
+      readme-only:
+        description: Only copy README.md to the mod portal page, without building or releasing anything.
+        type: boolean
+        default: false
+    secrets:
+      FACTORIO_API_KEY:
+        description: Mod portal API key with the upload and edit scopes. Without it the release stays on GitHub only.
+        required: false
+
+# No permissions block: a called workflow can only lower what the caller grants, so the caller sets contents: write.
+
+jobs:
+  release:
+    # pwsh is preinstalled here, and release.ps1 has nothing Windows specific in it.
+    runs-on: ubuntu-latest
+    # Job level, because a step cannot read the secrets context from its own if.
+    env:
+      FACTORIO_API_KEY: ${{ secrets.FACTORIO_API_KEY }}
+      # The github context belongs to the caller, so this is the mod repository's default branch.
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.DEFAULT_BRANCH }}
+          # release.ps1 looks up the previous release among the tags, which a shallow clone lacks.
+          fetch-depth: 0
+
+      - name: Check the tag is on top of the default branch
+        if: ${{ !inputs.readme-only }}
+        run: |
+          if [ "$(git rev-parse HEAD)" != "${{ github.sha }}" ]; then
+            echo "Tag $GITHUB_REF_NAME is not the tip of $DEFAULT_BRANCH, so the changelog commit has nowhere to go" >&2
+            exit 1
+          fi
+
+      - name: Stamp the version into the changelog
+        if: ${{ !inputs.readme-only }}
+        shell: pwsh
+        run: |
+          # The placeholder entry collects everything written since the last release.
+          $changelog = Get-Content changelog.txt -Raw
+          if ($changelog -notmatch '(?m)^Version: 0\.0\.0\r?$') { throw "No 0.0.0 placeholder at the top of changelog.txt" }
+          $stamped = "Version: $env:GITHUB_REF_NAME`nDate: $(Get-Date -Format 'yyyy-MM-dd')"
+          $changelog -replace '(?m)^Version: 0\.0\.0\r?$', $stamped | Set-Content changelog.txt -NoNewline
+
+      # release.ps1 belongs to the mod, so each mod decides what goes into its zip.
+      # It stamps the version into info.json too, from GITHUB_REF_NAME.
+      - name: Build
+        if: ${{ !inputs.readme-only }}
+        shell: pwsh
+        run: ./release.ps1
+
+      - name: Publish release
+        if: ${{ !inputs.readme-only }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Release notes are the changelog entry just stamped, turned into markdown.
+          $entry = ((Get-Content changelog.txt -Raw) -split '(?m)^-{99}\r?$' |
+              Where-Object { $_.Trim() } | Select-Object -First 1).Trim() -split '\r?\n' |
+              Where-Object { $_ -notmatch '^(Version|Date):' } |
+              ForEach-Object { $_ -replace '^  (\S.*):$', '### $1' -replace '^    - ', '- ' }
+          $notes = Join-Path $env:RUNNER_TEMP 'notes.md' # kept out of the repo, it gets committed later
+          Set-Content $notes ($entry -join "`n")
+
+          gh release create "$env:GITHUB_REF_NAME" (Get-Item build/*.zip).FullName --notes-file $notes
+
+      # The mod page itself is created by hand; this only adds a release to it.
+      - name: Upload to the mod portal
+        if: ${{ !inputs.readme-only && env.FACTORIO_API_KEY != '' }}
+        shell: pwsh
+        run: |
+          $zip = (Get-Item build/*.zip).FullName
+          $headers = @{ Authorization = "Bearer $env:FACTORIO_API_KEY" }
+
+          $init = Invoke-RestMethod -Method Post -Headers $headers `
+              -Uri 'https://mods.factorio.com/api/v2/mods/releases/init_upload' `
+              -Form @{ mod = (Get-Content info.json -Raw | ConvertFrom-Json).name }
+
+          Invoke-RestMethod -Method Post -Headers $headers -Uri $init.upload_url `
+              -Form @{ file = Get-Item $zip } | Out-Null
+
+      # The tag itself still holds the placeholder: it was written before this ran.
+      - name: Commit the changelog and reopen it for the next release
+        if: ${{ !inputs.readme-only }}
+        shell: pwsh
+        run: |
+          $separator = '-' * 99
+          $placeholder = "$separator`nVersion: 0.0.0`n  Changes:`n    - Nothing yet`n"
+          Set-Content changelog.txt ($placeholder + (Get-Content changelog.txt -Raw)) -NoNewline
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -am "Release $env:GITHUB_REF_NAME"
+          git push origin "HEAD:$env:DEFAULT_BRANCH"
+
+      # Last, so a failed sync cannot leave the changelog without its stamped entry.
+      # A release without the key skips it; a README-only run without the key fails instead.
+      - name: Copy the README to the mod portal page
+        if: ${{ inputs.readme-only || env.FACTORIO_API_KEY != '' }}
+        shell: pwsh
+        run: |
+          if (-not $env:FACTORIO_API_KEY) { throw "FACTORIO_API_KEY is not set, so there is nothing to sync with" }
+          $info = Get-Content info.json -Raw | ConvertFrom-Json
+          $headers = @{ Authorization = "Bearer $env:FACTORIO_API_KEY" }
+
+          Invoke-RestMethod -Method Post -Headers $headers `
+              -Uri 'https://mods.factorio.com/api/v2/mods/edit_details' `
+              -Form @{
+                  mod = $info.name
+                  summary = $info.description
+                  description = Get-Content README.md -Raw
+                  source_url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
+              } | Out-Null
