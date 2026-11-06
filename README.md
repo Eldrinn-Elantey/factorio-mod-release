@@ -10,7 +10,7 @@ Pushing a tag like `1.2.3` runs these steps in order:
 2. Replaces the `Version: 0.0.0` placeholder at the top of `changelog.txt` with the tag and today's date.
 3. Runs the mod's own `release.ps1`, which builds the zip into `build/`.
 4. Creates a GitHub release with the zip, using the changelog entry as release notes.
-5. Uploads the zip to the mod portal, if `FACTORIO_API_KEY` is set.
+5. Uploads the zip to the mod portal, if `FACTORIO_API_KEY` is set. When the portal does not know the mod yet, this step publishes it instead, with the README as the description, the `license` input as the license and the repository as the source link.
 6. Adds a new `0.0.0` placeholder to the changelog and commits it to the default branch.
 7. Copies `README.md` to the mod portal page, if `FACTORIO_API_KEY` is set. The README becomes the description, the `info.json` description becomes the summary, and the repository becomes the source link. This runs last so a failed sync cannot block the changelog commit.
 
@@ -20,8 +20,7 @@ With `readme-only: true` the workflow skips steps 1 to 6 and only copies the REA
 
 - `info.json` and `changelog.txt` in the root, with a `Version: 0.0.0` entry at the top of the changelog.
 - `release.ps1` in the root. It reads the version from `GITHUB_REF_NAME`, stamps it into `info.json` and writes exactly one zip into `build/`. The script stays in the mod so each mod picks its own files.
-- A mod page on the portal. You create it by hand with the first upload, since the API only adds releases to an existing mod and edits its details.
-- A `FACTORIO_API_KEY` secret with the "ModPortal: Upload Mods" and "ModPortal: Edit Mods" scopes, if the release should reach the portal.
+- A `FACTORIO_API_KEY` secret with the "ModPortal: Upload Mods", "ModPortal: Publish Mods" and "ModPortal: Edit Mods" scopes, if the release should reach the portal. The first release creates the mod page. Category and tags are set on the portal afterwards.
 
 ## Caller workflow
 

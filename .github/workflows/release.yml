@@ -7,9 +7,13 @@ on:
         description: Only copy README.md to the mod portal page, without building or releasing anything.
         type: boolean
         default: false
+      license:
+        description: Mod portal license id for the mod page, used only when the first release creates that page.
+        type: string
+        default: default_mit
     secrets:
       FACTORIO_API_KEY:
-        description: Mod portal API key with the upload and edit scopes. Without it the release stays on GitHub only.
+        description: Mod portal API key with the upload, publish and edit scopes. Without it the release stays on GitHub only.
         required: false
 
 # No permissions block: a called workflow can only lower what the caller grants, so the caller sets contents: write.
@@ -62,7 +66,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           # Release notes are the changelog entry just stamped, turned into markdown.
-          $entry = ((Get-Content changelog.txt -Raw) -split '(?m)^-{99}\r?$' |
+          $entry = ((Get-Content changelog.txt -Raw) -split '(?m)^-{99,}\r?$' |
               Where-Object { $_.Trim() } | Select-Object -First 1).Trim() -split '\r?\n' |
               Where-Object { $_ -notmatch '^(Version|Date):' } |
               ForEach-Object { $_ -replace '^  (\S.*):$', '### $1' -replace '^    - ', '- ' }
@@ -71,20 +75,33 @@ jobs:
 
           gh release create "$env:GITHUB_REF_NAME" (Get-Item build/*.zip).FullName --notes-file $notes
 
-      # The mod page itself is created by hand; this only adds a release to it.
       - name: Upload to the mod portal
         if: ${{ !inputs.readme-only && env.FACTORIO_API_KEY != '' }}
         shell: pwsh
+        env:
+          LICENSE: ${{ inputs.license }}
         run: |
           $zip = (Get-Item build/*.zip).FullName
+          $name = (Get-Content info.json -Raw | ConvertFrom-Json).name
           $headers = @{ Authorization = "Bearer $env:FACTORIO_API_KEY" }
+          $fields = @{ file = Get-Item $zip }
 
-          $init = Invoke-RestMethod -Method Post -Headers $headers `
-              -Uri 'https://mods.factorio.com/api/v2/mods/releases/init_upload' `
-              -Form @{ mod = (Get-Content info.json -Raw | ConvertFrom-Json).name }
+          try {
+              $init = Invoke-RestMethod -Method Post -Headers $headers `
+                  -Uri 'https://mods.factorio.com/api/v2/mods/releases/init_upload' `
+                  -Form @{ mod = $name }
+          } catch {
+              # init_upload only adds a release to an existing mod, so an unknown name means the first release: publish the mod instead.
+              if ($_.ErrorDetails.Message -notmatch 'UnknownMod') { throw }
+              $init = Invoke-RestMethod -Method Post -Headers $headers `
+                  -Uri 'https://mods.factorio.com/api/v2/mods/init_publish' `
+                  -Form @{ mod = $name }
+              $fields.description = Get-Content README.md -Raw
+              $fields.license = $env:LICENSE
+              $fields.source_url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
+          }
 
-          Invoke-RestMethod -Method Post -Headers $headers -Uri $init.upload_url `
-              -Form @{ file = Get-Item $zip } | Out-Null
+          Invoke-RestMethod -Method Post -Headers $headers -Uri $init.upload_url -Form $fields | Out-Null
 
       # The tag itself still holds the placeholder: it was written before this ran.
       - name: Commit the changelog and reopen it for the next release
