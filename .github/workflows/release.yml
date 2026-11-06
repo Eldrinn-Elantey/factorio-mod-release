@@ -7,10 +7,6 @@ on:
         description: Only copy README.md to the mod portal page, without building or releasing anything.
         type: boolean
         default: false
-      license:
-        description: Mod portal license id for the mod page, used only when the first release creates that page.
-        type: string
-        default: default_mit
     secrets:
       FACTORIO_API_KEY:
         description: Mod portal API key with the upload, publish and edit scopes. Without it the release stays on GitHub only.
@@ -78,11 +74,11 @@ jobs:
       - name: Upload to the mod portal
         if: ${{ !inputs.readme-only && env.FACTORIO_API_KEY != '' }}
         shell: pwsh
-        env:
-          LICENSE: ${{ inputs.license }}
         run: |
           $zip = (Get-Item build/*.zip).FullName
           $name = (Get-Content info.json -Raw | ConvertFrom-Json).name
+          # portal.json is optional and holds the mod page settings: category, license and tags.
+          $portal = if (Test-Path portal.json) { Get-Content portal.json -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
           $headers = @{ Authorization = "Bearer $env:FACTORIO_API_KEY" }
           $fields = @{ file = Get-Item $zip }
 
@@ -97,7 +93,8 @@ jobs:
                   -Uri 'https://mods.factorio.com/api/v2/mods/init_publish' `
                   -Form @{ mod = $name }
               $fields.description = Get-Content README.md -Raw
-              $fields.license = $env:LICENSE
+              $fields.license = if ($portal.license) { $portal.license } else { 'default_mit' }
+              if ($portal.category) { $fields.category = $portal.category }
               $fields.source_url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
           }
 
@@ -125,13 +122,19 @@ jobs:
         run: |
           if (-not $env:FACTORIO_API_KEY) { throw "FACTORIO_API_KEY is not set, so there is nothing to sync with" }
           $info = Get-Content info.json -Raw | ConvertFrom-Json
+          $portal = if (Test-Path portal.json) { Get-Content portal.json -Raw | ConvertFrom-Json } else { [pscustomobject]@{} }
           $headers = @{ Authorization = "Bearer $env:FACTORIO_API_KEY" }
+          $form = @{
+              mod = $info.name
+              summary = $info.description
+              description = Get-Content README.md -Raw
+              source_url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
+          }
+          # Only what portal.json sets is sent, so a mod without the file keeps whatever the page has.
+          if ($portal.category) { $form.category = $portal.category }
+          if ($portal.license) { $form.license = $portal.license }
+          if ($portal.tags) { $form.tags = @($portal.tags) }
 
           Invoke-RestMethod -Method Post -Headers $headers `
               -Uri 'https://mods.factorio.com/api/v2/mods/edit_details' `
-              -Form @{
-                  mod = $info.name
-                  summary = $info.description
-                  description = Get-Content README.md -Raw
-                  source_url = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY"
-              } | Out-Null
+              -Form $form | Out-Null
